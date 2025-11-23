@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+ultralytics
+opencv-python-headless
+pandas
+numpy
+python-multipart
+reportlab
+matplotlib
+folium
+requests
+scikit-learn
+statsmodels
+selenium
+pyppeteer
+python-dotenv
