@@ -84,6 +84,309 @@ def classify_waste_and_hazard_from_label(label: str, conf: float = 0.0, conf_thr
 
 	return waste_state, hazard, hazard_type
 
+
+def parse_sensor_ppm(value, sensor_name="sensor"):
+	"""Parse sensor ppm value to float with validation; return (ppm or None, error or None)."""
+	try:
+		if value is None or str(value).strip() == "":
+			return None, f"{sensor_name} missing"
+		val_str = str(value).strip().lower()
+		if val_str == "error" or val_str == "nan":
+			return None, f"{sensor_name} error state"
+		val = float(val_str)
+		if val < 0:
+			return None, f"{sensor_name} negative value"
+		return val, None
+	except Exception as e:
+		return None, f"{sensor_name} invalid ({e})"
+
+def parse_mq135_ppm(value):
+	"""Parse mq135_ppm to float with basic validation; return (ppm or None, error or None)."""
+	return parse_sensor_ppm(value, "mq135")
+
+def parse_mq2_ppm(value):
+	"""Parse mq2_ppm to float with basic validation; return (ppm or None, error or None)."""
+	return parse_sensor_ppm(value, "mq2")
+
+
+def classify_mq135_gas(ppm: Optional[float]):
+	"""Lightweight heuristic for MQ135: returns probable gas name and level band.
+
+	This is an approximation because MQ135 is a generic air-quality sensor without per-gas calibration.
+	"""
+	if ppm is None:
+		return {
+			"gas": "unknown",
+			"level": "unknown",
+			"approx_ppm": None,
+			"candidates": ["CO2", "VOC", "NH3", "smoke"],
+			"note": "mq135_ppm missing",
+		}
+
+	bands = [
+		(400, "fresh_air", "good", "Baseline / fresh air"),
+		(1000, "co2_or_voc", "elevated", "Likely CO2 buildup or mild VOCs"),
+		(2000, "co2_or_voc", "high", "Poor ventilation / strong VOCs"),
+		(5000, "co2_or_voc", "very_high", "Potentially hazardous; ventilate immediately"),
+	]
+
+	for limit, gas, level, note in bands:
+		if ppm <= limit:
+			return {
+				"gas": gas,
+				"level": level,
+				"approx_ppm": round(ppm, 2),
+				"candidates": ["CO2", "VOC", "NH3", "smoke"],
+				"note": note,
+			}
+
+	# Above 5000 ppm is treated as danger-zone for CO2/VOC exposure
+	return {
+		"gas": "co2_or_voc",
+		"level": "dangerous",
+		"approx_ppm": round(ppm, 2),
+		"candidates": ["CO2", "VOC", "NH3", "smoke"],
+		"note": "Above 5000 ppm (danger zone)",
+	}
+
+
+def parse_ultrasonic_distance(value, sensor_name: str = "JSN-SR04T") -> tuple:
+	"""Parse and validate ultrasonic distance sensor reading.
+	
+	JSN-SR04T specs:
+	- Operating range: 25cm to 450cm
+	- Waterproof ultrasonic sensor
+	
+	Returns: (distance_cm, error_message)
+	  distance_cm: float if valid, negative error code if invalid
+	  error_message: str describing error, empty if valid
+	"""
+	if value is None:
+		return (-1, f"{sensor_name}_MISSING_VALUE")
+	
+	try:
+		distance = float(value)
+	except (ValueError, TypeError):
+		return (-2, f"{sensor_name}_INVALID_FORMAT")
+	
+	# Range validation: 25cm to 450cm
+	if distance < 0:
+		return (-3, f"{sensor_name}_NEGATIVE_DISTANCE")
+	
+	if distance < 25:
+		return (-4, f"{sensor_name}_BELOW_MIN_RANGE")
+	
+	if distance > 450:
+		return (-5, f"{sensor_name}_ABOVE_MAX_RANGE")
+	
+	return (distance, "")
+
+
+def classify_ultrasonic_detection(distance_cm: Optional[float]):
+	"""Classify object detection based on JSN-SR04T ultrasonic sensor distance.
+	
+	Returns detection status, range classification, and recommendations.
+	"""
+	if distance_cm is None:
+		return {
+			"status": "error",
+			"distance_cm": None,
+			"range": "unknown",
+			"object_detected": False,
+			"fill_level_pct": None,
+			"note": "ultrasonic_cm missing",
+		}
+	
+	# Error code handling
+	if distance_cm < 0:
+		error_messages = {
+			-1: "Sensor value missing",
+			-2: "Invalid format",
+			-3: "Negative distance reading",
+			-4: "Below minimum range (25cm)",
+			-5: "Above maximum range (450cm)",
+		}
+		return {
+			"status": "error",
+			"distance_cm": distance_cm,
+			"range": "error",
+			"object_detected": False,
+			"fill_level_pct": None,
+			"note": error_messages.get(int(distance_cm), "Unknown sensor error"),
+		}
+	
+	# Distance classification bands
+	# Assuming sensor is mounted at top of bin looking down
+	# Maximum 450cm = empty, minimum 25cm = full
+	MAX_DISTANCE = 450  # cm (empty bin)
+	MIN_DISTANCE = 25   # cm (full bin)
+	
+	# Calculate fill level percentage (inverse of distance)
+	fill_level = 100 - ((distance_cm - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE) * 100)
+	fill_level = max(0, min(100, fill_level))  # Clamp to 0-100
+	
+	# Range classification
+	if distance_cm <= 50:
+		range_class = "very_close"
+		note = "Object very close - bin almost full"
+		object_detected = True
+	elif distance_cm <= 100:
+		range_class = "close"
+		note = "Object close - bin filling up"
+		object_detected = True
+	elif distance_cm <= 200:
+		range_class = "medium"
+		note = "Object at medium distance"
+		object_detected = True
+	elif distance_cm <= 350:
+		range_class = "far"
+		note = "Object far - bin has space"
+		object_detected = True
+	else:
+		range_class = "very_far"
+		note = "Object very far or bin empty"
+		object_detected = distance_cm < 450
+	
+	return {
+		"status": "ok",
+		"distance_cm": round(distance_cm, 2),
+		"range": range_class,
+		"object_detected": object_detected,
+		"fill_level_pct": round(fill_level, 1),
+		"note": note,
+	}
+
+
+def classify_mq2_gas(ppm: Optional[float]):
+	"""MQ2 detects flammable gases: LPG, propane, methane, hydrogen, alcohol, smoke.
+
+	Returns gas name, detection level, and approximate amount.
+	"""
+	if ppm is None:
+		return {
+			"gas": "unknown",
+			"level": "unknown",
+			"approx_ppm": None,
+			"candidates": ["LPG", "propane", "methane", "H2", "alcohol", "smoke"],
+			"detection": "none",
+			"note": "mq2_ppm missing",
+		}
+
+	# MQ2 concentration bands (ppm thresholds are approximate - calibration dependent)
+	bands = [
+		(200, "clean_air", "none", "good", "No flammable gas detected"),
+		(300, "lpg_or_smoke", "trace", "acceptable", "Trace amounts of combustible gases"),
+		(800, "lpg_propane_methane", "low", "elevated", "Low concentration of flammable gas"),
+		(2000, "lpg_propane_methane", "medium", "high", "Moderate flammable gas - check for leaks"),
+		(5000, "flammable_gas_hazard", "high", "very_high", "High flammable gas - potential fire/explosion risk"),
+	]
+
+	for limit, gas, detection, level, note in bands:
+		if ppm <= limit:
+			return {
+				"gas": gas,
+				"level": level,
+				"approx_ppm": round(ppm, 2),
+				"candidates": ["LPG", "propane", "methane", "H2", "alcohol", "smoke"],
+				"detection": detection,
+				"note": note,
+			}
+
+	# Above 5000 ppm
+	return {
+		"gas": "dangerous_flammable",
+		"level": "dangerous",
+		"approx_ppm": round(ppm, 2),
+		"candidates": ["LPG", "propane", "methane", "H2", "alcohol", "smoke"],
+		"detection": "extreme",
+		"note": "DANGER: Extreme flammable gas (>5000 ppm) - evacuate and ventilate!",
+	}
+
+
+def analyze_combined_gas(mq2_ppm: Optional[float], mq135_ppm: Optional[float]):
+	"""Cross-correlate MQ2 and MQ135 readings to identify likely gas sources.
+
+	MQ2: detects flammable gases (LPG, propane, methane, H2, alcohol, smoke)
+	MQ135: detects air quality (CO2, VOC, NH3, smoke, benzene)
+
+	Returns combined analysis with probable gas identification.
+	"""
+	mq2_result = classify_mq2_gas(mq2_ppm)
+	mq135_result = classify_mq135_gas(mq135_ppm)
+
+	# Combined analysis logic
+	combined = {
+		"mq2": mq2_result,
+		"mq135": mq135_result,
+		"probable_gas": "unknown",
+		"confidence": "low",
+		"hazard_level": "safe",
+		"recommendation": "",
+	}
+
+	# Both sensors missing
+	if mq2_ppm is None and mq135_ppm is None:
+		combined["probable_gas"] = "no_data"
+		combined["recommendation"] = "No sensor data available"
+		return combined
+
+	# Correlation patterns
+	mq2_elevated = mq2_ppm and mq2_ppm > 300
+	mq135_elevated = mq135_ppm and mq135_ppm > 1000
+	mq2_high = mq2_ppm and mq2_ppm > 2000
+	mq135_high = mq135_ppm and mq135_ppm > 2000
+
+	# Pattern 1: Both sensors show high readings - likely smoke/fire
+	if mq2_high and mq135_high:
+		combined["probable_gas"] = "smoke_or_fire"
+		combined["confidence"] = "high"
+		combined["hazard_level"] = "critical"
+		combined["recommendation"] = "URGENT: Smoke or fire detected - evacuate immediately!"
+
+	# Pattern 2: MQ2 high, MQ135 moderate - flammable gas leak
+	elif mq2_high and not mq135_high:
+		combined["probable_gas"] = "lpg_or_propane_leak"
+		combined["confidence"] = "high"
+		combined["hazard_level"] = "high"
+		combined["recommendation"] = "Check for gas leaks - ventilate area immediately"
+
+	# Pattern 3: MQ135 high, MQ2 low - organic vapors/CO2
+	elif mq135_high and not mq2_elevated:
+		combined["probable_gas"] = "organic_vapor_or_co2"
+		combined["confidence"] = "medium"
+		combined["hazard_level"] = "medium"
+		combined["recommendation"] = "Poor air quality - improve ventilation"
+
+	# Pattern 4: Both elevated but not critical
+	elif mq2_elevated and mq135_elevated:
+		combined["probable_gas"] = "mixed_combustion_products"
+		combined["confidence"] = "medium"
+		combined["hazard_level"] = "medium"
+		combined["recommendation"] = "Multiple gas sources detected - monitor closely"
+
+	# Pattern 5: Only MQ2 trace detection
+	elif mq2_elevated and not mq135_elevated:
+		combined["probable_gas"] = "trace_flammable"
+		combined["confidence"] = "low"
+		combined["hazard_level"] = "low"
+		combined["recommendation"] = "Trace flammable gas - continue monitoring"
+
+	# Pattern 6: Only MQ135 elevated
+	elif mq135_elevated and not mq2_elevated:
+		combined["probable_gas"] = "air_quality_issue"
+		combined["confidence"] = "medium"
+		combined["hazard_level"] = "low"
+		combined["recommendation"] = "Air quality degraded - improve ventilation"
+
+	# Pattern 7: Both normal
+	else:
+		combined["probable_gas"] = "clean_air"
+		combined["confidence"] = "high"
+		combined["hazard_level"] = "safe"
+		combined["recommendation"] = "Air quality normal"
+
+	return combined
+
 def get_model_path():
 	candidates = [
 		ROOT / "yolo" / "yolov8n.pt",
@@ -142,6 +445,28 @@ async def telemetry(json_payload: dict):
 	def g(k):
 		return json_payload.get(k, "")
 
+	# Parse both MQ2 and MQ135
+	mq2_raw = g("mq2_ppm")
+	mq135_raw = g("mq135_ppm")
+	mq2_ppm, mq2_error = parse_mq2_ppm(mq2_raw)
+	mq135_ppm, mq135_error = parse_mq135_ppm(mq135_raw)
+	
+	# Parse ultrasonic sensor
+	ultrasonic_raw = g("ultrasonic_cm") or g("ultrasonic")
+	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(ultrasonic_raw)
+	
+	# Get combined gas analysis
+	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
+	if mq2_error:
+		gas_analysis["mq2"]["error"] = mq2_error
+	if mq135_error:
+		gas_analysis["mq135"]["error"] = mq135_error
+	
+	# Get ultrasonic detection analysis
+	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
+	if ultrasonic_error:
+		ultrasonic_analysis["error"] = ultrasonic_error
+
 	row = [
 		ts,
 		g("device_id"),
@@ -168,7 +493,7 @@ async def telemetry(json_payload: dict):
 	]
 
 	append_row(row)
-	return JSONResponse({"status":"ok"})
+	return JSONResponse({"status":"ok", "gas_analysis": gas_analysis, "ultrasonic_analysis": ultrasonic_analysis})
 
 @app.post("/image")
 async def image(
@@ -222,6 +547,25 @@ async def image(
 		s = json.loads(sensors)
 	except:
 		s = {}
+
+	# Parse both MQ2 and MQ135 from sensors
+	mq2_ppm, mq2_error = parse_mq2_ppm(s.get("mq2_ppm"))
+	mq135_ppm, mq135_error = parse_mq135_ppm(s.get("mq135_ppm"))
+	
+	# Parse ultrasonic sensor
+	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(s.get("ultrasonic_cm") or s.get("ultrasonic"))
+	
+	# Get combined gas analysis
+	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
+	if mq2_error:
+		gas_analysis["mq2"]["error"] = mq2_error
+	if mq135_error:
+		gas_analysis["mq135"]["error"] = mq135_error
+	
+	# Get ultrasonic detection analysis
+	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
+	if ultrasonic_error:
+		ultrasonic_analysis["error"] = ultrasonic_error
 
 	# write to CSV using canonical order
 	ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -280,6 +624,8 @@ async def image(
 		"waste_state": waste_state,
 		"hazard": int(hazard),
 		"hazard_type": hazard_type,
+		"gas_analysis": gas_analysis,
+		"ultrasonic_analysis": ultrasonic_analysis,
 	})
 
 
@@ -349,6 +695,26 @@ def image_url(payload: dict):
 	ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 	def sget(k, default=""):
 		return sensors.get(k, default)
+
+	# Parse both MQ2 and MQ135 from sensors
+	mq2_ppm, mq2_error = parse_mq2_ppm(sensors.get("mq2_ppm"))
+	mq135_ppm, mq135_error = parse_mq135_ppm(sensors.get("mq135_ppm"))
+	
+	# Parse ultrasonic sensor
+	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(sensors.get("ultrasonic_cm") or sensors.get("ultrasonic"))
+	
+	# Get combined gas analysis
+	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
+	if mq2_error:
+		gas_analysis["mq2"]["error"] = mq2_error
+	if mq135_error:
+		gas_analysis["mq135"]["error"] = mq135_error
+	
+	# Get ultrasonic detection analysis
+	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
+	if ultrasonic_error:
+		ultrasonic_analysis["error"] = ultrasonic_error
+
 	row = [
 		ts, sget("device_id"), sget("boat_id"), sget("lat"), sget("lon"),
 		sget("heading_deg"), sget("mq135_ppm"), sget("mq2_ppm"), sget("soil_dry_belt_pct"),
@@ -371,6 +737,8 @@ def image_url(payload: dict):
 		"waste_state": waste_state,
 		"hazard": int(hazard),
 		"hazard_type": hazard_type,
+		"gas_analysis": gas_analysis,
+		"ultrasonic_analysis": ultrasonic_analysis,
 	})
 
 @app.get("/detected")
