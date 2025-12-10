@@ -5,6 +5,88 @@
  * Includes: MQ2, MQ135, JSN-SR04T ultrasonic, temperature, humidity sensors.
  * 
  * ============================================================================
+ * ⚠️ IMPORTANT: ARDUINO IDE SETUP REQUIRED BEFORE COMPILING ⚠️
+ * ============================================================================
+ * 
+ * This code REQUIRES ESP32 board support to be installed in Arduino IDE.
+ * Follow these steps EXACTLY:
+ * 
+ * STEP 1: Install ESP32 Board Support
+ * ------------------------------------
+ * 1. Open Arduino IDE
+ * 2. Go to: File → Preferences (or Ctrl+Comma)
+ * 3. In "Additional Board Manager URLs" field, add this URL:
+ *    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+ *    
+ *    (If there are other URLs, separate with comma or click the window icon)
+ * 4. Click OK
+ * 5. Go to: Tools → Board → Boards Manager (or Ctrl+Shift+B)
+ * 6. Wait for the list to load
+ * 7. In the search box, type: "esp32"
+ * 8. Find "esp32 by Espressif Systems"
+ * 9. Click INSTALL (version 2.0.11 or later recommended)
+ * 10. Wait for installation to complete (may take 5-10 minutes)
+ * 11. Close Boards Manager
+ * 12. RESTART Arduino IDE (very important!)
+ * 
+ * STEP 2: Select Correct Board
+ * -----------------------------
+ * After restarting Arduino IDE:
+ * 1. Go to: Tools → Board → ESP32 Arduino (expand this menu)
+ * 2. Scroll down and select: "AI Thinker ESP32-CAM"
+ * 3. You should see it selected in Tools → Board menu
+ * 
+ * STEP 3: Configure Board Settings
+ * ---------------------------------
+ * Tools → Upload Speed: 115200
+ * Tools → Flash Frequency: 80MHz
+ * Tools → Flash Mode: QIO
+ * Tools → Partition Scheme: "Huge APP (3MB No OTA/1MB SPIFFS)"
+ * Tools → Core Debug Level: None
+ * Tools → Port: Select your FTDI COM port (e.g., COM3, COM4)
+ * 
+ * STEP 4: Install Required Libraries
+ * -----------------------------------
+ * Go to: Tools → Manage Libraries (or Ctrl+Shift+I)
+ * Install these libraries:
+ * - Search "ArduinoJson" → Install "ArduinoJson" by Benoit Blanchon (v6.21.3+)
+ * - Search "Base64" → Install "Base64" by Densaugeo (v1.4.0+)
+ * 
+ * STEP 5: Verify Installation
+ * ----------------------------
+ * Test with built-in example first:
+ * File → Examples → ESP32 → Camera → CameraWebServer
+ * Try to compile (Ctrl+R or Verify button)
+ * If this compiles successfully, your ESP32 setup is correct!
+ * 
+ * TROUBLESHOOTING "esp_camera.h: No such file or directory"
+ * ----------------------------------------------------------
+ * This error means ESP32 board support is NOT properly installed.
+ * 
+ * Common causes and solutions:
+ * 
+ * ❌ Cause 1: ESP32 boards not installed
+ *    ✅ Solution: Follow STEP 1 above carefully
+ * 
+ * ❌ Cause 2: Wrong board selected
+ *    ✅ Solution: Make sure "AI Thinker ESP32-CAM" is selected (STEP 2)
+ * 
+ * ❌ Cause 3: Arduino IDE not restarted after installation
+ *    ✅ Solution: Close and reopen Arduino IDE
+ * 
+ * ❌ Cause 4: Corrupted installation
+ *    ✅ Solution: Uninstall and reinstall:
+ *       - Tools → Board → Boards Manager
+ *       - Find "esp32 by Espressif Systems"
+ *       - Click REMOVE
+ *       - Restart Arduino IDE
+ *       - Reinstall from STEP 1
+ * 
+ * ❌ Cause 5: Arduino IDE too old
+ *    ✅ Solution: Update to Arduino IDE 1.8.19 or Arduino IDE 2.x
+ *       Download from: https://www.arduino.cc/en/software
+ * 
+ * ============================================================================
  * FTDI PROGRAMMER WIRING FOR ESP32-CAM (AI-THINKER)
  * ============================================================================
  * 
@@ -76,11 +158,11 @@
 #include <base64.h>
 
 // ===== WiFi Configuration =====
-const char* WIFI_SSID = "YourWiFiSSID";
-const char* WIFI_PASS = "YourWiFiPassword";
+const char* WIFI_SSID = "Ratul";
+const char* WIFI_PASS = "12345678";
 
 // ===== Backend API Configuration =====
-const char* BACKEND_HOST = "192.168.1.100"; // Change to your server IP
+const char* BACKEND_HOST = "10.160.138.53"; // Change to your server IP
 const int BACKEND_PORT = 8000;
 const char* IMAGE_ENDPOINT = "/image_base64";
 

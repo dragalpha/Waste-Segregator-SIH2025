@@ -7,9 +7,9 @@
 #include "esp_camera.h"
 
 // === EDIT THESE ===
-const char* ssid = "YOUR_SSID";
-const char* password = "YOUR_PASSWORD";
-const char* serverUrl = "http://192.168.0.100:8000/image"; // change to your PC IP
+const char* ssid = "Ratul 2";
+const char* password = "12345678";
+const char* serverUrl = "http://10.160.138.53:8000/image"; // change to your PC IP
 
 // Onboard LED pin (change for your board)
 const int HAZARD_LED_PIN = 33; // Example GPIO for ESP32-CAM dev boards
