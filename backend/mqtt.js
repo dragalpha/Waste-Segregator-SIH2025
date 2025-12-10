@@ -28,6 +28,7 @@ function start() {
   client = mqtt.connect(url, options);
 
   client.on('connect', () => {
+    console.log('MQTT client connected');
     console.log('Connected to MQTT broker:', url);
     // subscribe to telemetry topic
     const telemetryTopic = (config.topics && config.topics.telemetry) || 'pavitrax/boat1/telemetry';

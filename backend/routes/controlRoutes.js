@@ -10,4 +10,10 @@ router.post('/send', (req, res) => {
   res.json(result);
 });
 
+// POST /api/control/start-backend - trigger backend start command from frontend
+router.post('/start-backend', (_req, res) => {
+  const result = controlController.sendCommand({ action: 'start_backend' });
+  res.json(result);
+});
+
 module.exports = router;

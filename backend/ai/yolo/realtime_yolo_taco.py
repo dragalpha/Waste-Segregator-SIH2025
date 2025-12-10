@@ -14,9 +14,84 @@ Usage examples:
 import argparse
 import os
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import cv2
 
+mjpeg_server = None
+latest_jpeg = None
+
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != '/stream':
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header('Age', 0)
+        self.send_header('Cache-Control', 'no-cache, private')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.end_headers()
+        try:
+            while True:
+                if latest_jpeg is None:
+                    time.sleep(0.05)
+                    continue
+                self.wfile.write(b'--frame\r\n')
+                self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                self.wfile.write(b'Content-Length: ' + str(len(latest_jpeg)).encode() + b'\r\n\r\n')
+                self.wfile.write(latest_jpeg)
+                self.wfile.write(b'\r\n')
+                time.sleep(0.04)
+        except Exception:
+            # client disconnected
+            pass
+
+
+def start_mjpeg_server(host='127.0.0.1', port=8090):
+    global mjpeg_server
+    if mjpeg_server:
+        return mjpeg_server
+    try:
+        mjpeg_server = HTTPServer((host, port), MJPEGHandler)
+    except OSError as e:
+        print(f"MJPEG server failed to start on {host}:{port}: {e}")
+        mjpeg_server = None
+        return None
+
+    thread = threading.Thread(target=mjpeg_server.serve_forever, daemon=True)
+    thread.start()
+    print(f"MJPEG stream at http://{host}:{port}/stream")
+    return mjpeg_server
+
+# keyword sets reused across classification helpers
+KEYWORDS_WET = (
+    # Generic wet/organic
+    'wet', 'water', 'mud', 'liquid', 'food', 'banana', 'apple', 'fruit', 'vegetable',
+    'organic', 'organic_matter', 'food_waste', 'peel', 'leaf', 'plant_debris',
+    # Dataset-specific wet labels
+    'food_waste', 'fruit', 'vegetable', 'organic_matter', 'leaf', 'plant_debris'
+)
+KEYWORDS_DRY = (
+    # Generic dry/recyclable
+    'dry', 'paper', 'cardboard', 'plastic', 'metal', 'glass', 'wood', 'carton', 'tissue',
+    'cloth', 'fabric', 'wrapper', 'bag', 'box', 'cup', 'straw', 'bottle', 'can', 'jar',
+    'stick', 'leaflet', 'newspaper',
+    # Dataset-specific dry labels
+    'plastic_bottle', 'plastic_bag', 'plastic_wrapper', 'plastic_cup', 'paper', 'cardboard',
+    'newspaper', 'metal_can', 'metal_scrap', 'glass_bottle', 'glass_jar', 'textile', 'cloth',
+    'floating_plastic', 'floating_wood', 'floating_debris'
+    # COCO common disposables/gear
+    'fork', 'knife', 'spoon', 'bowl', 'chair', 'couch', 'sofa', 'bench', 'book',
+    'handbag', 'backpack', 'suitcase', 'umbrella', 'tv', 'laptop', 'mouse', 'keyboard',
+    'remote', 'cell phone', 'toothbrush', 'hair drier'
+)
+KEYWORDS_HAZARD = (
+    'battery', 'chemical', 'glass', 'sharp', 'hazard', 'flammable'
+)
 
 def try_import_ultralytics():
     try:
@@ -85,20 +160,15 @@ def classify_waste_and_hazard(labels, confs, conf_threshold=0.25):
     hazard = 0
     hazard_type = ''
 
-    # broaden keyword lists to typical waste items
-    keywords_wet = ('wet', 'water', 'mud', 'liquid', 'food', 'banana', 'apple', 'vegetable', 'organic', 'food_waste', 'peel')
-    keywords_dry = ('dry', 'paper', 'cardboard', 'plastic', 'metal', 'glass', 'cloth', 'fabric')
-    keywords_hazard = ('battery', 'chemical', 'glass', 'sharp', 'hazard', 'flammable', 'rust', 'acid', 'alkali')
-
     for lab, c in zip(labels, confs):
         if c < conf_threshold:
             continue
         ll = lab.lower()
-        if any(k in ll for k in keywords_wet):
+        if any(k in ll for k in KEYWORDS_WET):
             waste_state = 'wet'
-        if any(k in ll for k in keywords_dry) and waste_state == 'unknown':
+        if any(k in ll for k in KEYWORDS_DRY) and waste_state == 'unknown':
             waste_state = 'dry'
-        for hk in keywords_hazard:
+        for hk in KEYWORDS_HAZARD:
             if hk in ll:
                 hazard = 1
                 hazard_type = lab
@@ -107,6 +177,65 @@ def classify_waste_and_hazard(labels, confs, conf_threshold=0.25):
             break
 
     return waste_state, hazard, hazard_type
+
+
+def compute_wet_dry_percentages(labels, confs, conf_threshold=0.25):
+    """Return wet/dry percentages based on detected labels above the threshold."""
+    wet = 0
+    dry = 0
+    for lab, c in zip(labels, confs):
+        if c < conf_threshold:
+            continue
+        ll = lab.lower()
+        if any(k in ll for k in KEYWORDS_WET):
+            wet += 1
+        elif any(k in ll for k in KEYWORDS_DRY):
+            dry += 1
+
+    total = wet + dry
+    if total == 0:
+        return 0.0, 0.0
+
+    wet_pct = (wet / total) * 100.0
+    dry_pct = (dry / total) * 100.0
+    return wet_pct, dry_pct
+
+
+def open_capture(device, width, height):
+    """Try to open a webcam with sensible fallbacks (DirectShow for Windows).
+
+    We also verify we can grab a frame; if an API opens but cannot read (common
+    with MSMF on some cameras), we release and try the next option.
+    """
+    attempts = []
+    # Prefer DirectShow first on Windows, then default, then MSMF, then any.
+    attempts.append((device, cv2.CAP_DSHOW))
+    attempts.append((device, None))
+    attempts.append((device, cv2.CAP_MSMF))
+    attempts.append((device, cv2.CAP_ANY))
+
+    for dev, api_pref in attempts:
+        cap = None
+        try:
+            cap = cv2.VideoCapture(dev, api_pref) if api_pref is not None else cv2.VideoCapture(dev)
+        except Exception:
+            cap = cv2.VideoCapture(dev)
+        if not cap or not cap.isOpened():
+            if cap:
+                cap.release()
+            continue
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        # Verify we can actually read a frame; some APIs open but fail to grab.
+        ret, _ = cap.read()
+        if ret:
+            return cap
+
+        cap.release()
+
+    return None
 
 
 def run_local_model(args):
@@ -119,14 +248,13 @@ def run_local_model(args):
     print("Loading model:", model_path)
     model = YOLO(model_path)
 
-    # open webcam
-    cap = cv2.VideoCapture(args.device)
-    if not cap.isOpened():
-        print("Cannot open webcam")
+    cap = open_capture(args.camera_device, args.width, args.height)
+    if cap is None or not cap.isOpened():
+        print("Cannot open webcam (tried default and DirectShow)")
         return False
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    # start MJPEG server for browser overlay
+    start_mjpeg_server(host='127.0.0.1', port=args.mjpeg_port)
 
     print("Press 'q' to quit. Running local inference.")
     while True:
@@ -145,6 +273,8 @@ def run_local_model(args):
         boxes = []
         labels = []
         confs = []
+        ignore_set = {s.strip().lower() for s in args.ignore_classes.split(',') if s.strip()}
+
         for r in results:
             if not hasattr(r, 'boxes'):
                 continue
@@ -157,14 +287,37 @@ def run_local_model(args):
                 continue
             for i in range(len(xyxy)):
                 box = xyxy[i].cpu().numpy() if hasattr(xyxy[i], 'cpu') else xyxy[i]
-                boxes.append(box)
                 ci = int(cls_idx[i].item()) if cls_idx is not None else 0
                 name = model.names.get(ci, str(ci)) if hasattr(model, 'names') else str(ci)
+                conf_val = float(confidences[i].item()) if confidences is not None else 0.0
+                if name.lower() in ignore_set:
+                    continue
+                boxes.append(box)
                 labels.append(name)
-                confs.append(float(confidences[i].item()) if confidences is not None else 0.0)
+                confs.append(conf_val)
 
         # annotate
         annotated = annotate_frame(frame.copy(), boxes, labels, confs, getattr(model, 'names', {}))
+
+        # compute wet/dry percentages for on-screen display
+        wet_pct, dry_pct = compute_wet_dry_percentages(labels, confs, conf_threshold=args.conf)
+        overlay = f"Wet: {wet_pct:.1f}%  Dry: {dry_pct:.1f}%"
+        cv2.putText(
+            annotated,
+            overlay,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 200, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        # update MJPEG buffer
+        global latest_jpeg
+        ok, buf = cv2.imencode('.jpg', annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            latest_jpeg = buf.tobytes()
 
         # determine top detection
         top_text = "-"
@@ -227,13 +380,10 @@ def run_fallback_posting(args):
     # fallback: capture frames and POST to server like post_webcam_demo
     import requests
 
-    cap = cv2.VideoCapture(args.device)
-    if not cap.isOpened():
-        print("Cannot open webcam")
+    cap = open_capture(args.camera_device, args.width, args.height)
+    if cap is None or not cap.isOpened():
+        print("Cannot open webcam (tried default and DirectShow)")
         return False
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
     print("ultralytics not available — posting frames to server")
     while True:
@@ -281,12 +431,15 @@ def parse_args():
     p.add_argument('--model', help='Path to YOLO model (optional)')
     p.add_argument('--server-url', help='Backend /image endpoint to POST frames (optional)')
     p.add_argument('--write-detected', help='Path to write detected label (e.g. backend/ai/yolo/detected.txt)')
-    p.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
-    p.add_argument('--device', default=0, help='Webcam device index or cpu/cuda for ultralytics')
+    p.add_argument('--conf', type=float, default=0.35, help='Confidence threshold (higher = fewer false positives)')
+    p.add_argument('--ignore-classes', default='person', help='Comma-separated class names to ignore (default: person)')
+    p.add_argument('--device', default='cpu', help='YOLO device (cpu, cuda, 0, 0,1,2,3 etc)')
+    p.add_argument('--camera-device', default=0, type=int, help='Webcam device index (int)')
     p.add_argument('--width', type=int, default=640)
     p.add_argument('--height', type=int, default=480)
     p.add_argument('--interval', type=float, default=0.2, help='Seconds between frames')
     p.add_argument('--no-display', action='store_true', help='Do not show preview window')
+    p.add_argument('--mjpeg-port', type=int, default=8090, help='Port for MJPEG stream of annotated frames')
     return p.parse_args()
 
 

@@ -17,10 +17,10 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// database
+// database (optional for development)
 connectDB().catch((err) => {
-  console.error('Fatal: cannot connect to MongoDB', err);
-  process.exit(1);
+  console.warn('Warning: MongoDB not available, some features may not work:', err.message);
+  console.warn('Server will continue without database. Start MongoDB for full functionality.');
 });
 
 app.use('/api/telemetry', telemetryRoutes);
