@@ -182,6 +182,94 @@ def parse_ultrasonic_distance(value, sensor_name: str = "JSN-SR04T") -> tuple:
 	return (distance, "")
 
 
+def parse_inductive_proximity(value) -> tuple:
+	"""Parse and validate LJ12A3-4-Z/BY inductive proximity sensor reading.
+	
+	LJ12A3-4-Z/BY specs:
+	- Type: Inductive proximity sensor (detects metal objects)
+	- Detection distance: 4mm (typically 0-4mm)
+	- Output: NPN normally open (NO)
+	- Operating voltage: 6-36V DC
+	- Output signal: Digital (0 = no metal detected, 1 = metal detected)
+	
+	Returns: (status, error_message)
+	  status: 1 (metal detected), 0 (no metal), -1 to -3 (error codes)
+	  error_message: str describing error, empty if valid
+	"""
+	if value is None:
+		return (-1, "LJ12A3_MISSING_VALUE")
+	
+	# Accept string representations
+	if isinstance(value, str):
+		value = value.strip().lower()
+		if value in ('1', 'true', 'high', 'detected', 'on'):
+			return (1, "")
+		elif value in ('0', 'false', 'low', 'none', 'off'):
+			return (0, "")
+		else:
+			return (-2, "LJ12A3_INVALID_FORMAT")
+	
+	# Accept numeric values
+	try:
+		val = int(value)
+		if val == 1:
+			return (1, "")
+		elif val == 0:
+			return (0, "")
+		else:
+			return (-3, "LJ12A3_INVALID_VALUE")
+	except (ValueError, TypeError):
+		return (-2, "LJ12A3_INVALID_FORMAT")
+
+
+def classify_inductive_proximity(status: Optional[int]):
+	"""Classify metal detection based on LJ12A3-4-Z/BY inductive proximity sensor.
+	
+	Returns detection status, material type inference, and recommendations.
+	"""
+	if status is None:
+		return {
+			"status": "error",
+			"metal_detected": False,
+			"detection_state": "unknown",
+			"likely_material": "unknown",
+			"note": "proximity_inductive missing",
+		}
+	
+	# Error code handling
+	if status < 0:
+		error_messages = {
+			-1: "Sensor value missing",
+			-2: "Invalid format",
+			-3: "Invalid value (must be 0 or 1)",
+		}
+		return {
+			"status": "error",
+			"metal_detected": False,
+			"detection_state": "error",
+			"likely_material": "unknown",
+			"note": error_messages.get(status, "Unknown sensor error"),
+		}
+	
+	# Metal detection classification
+	if status == 1:
+		return {
+			"status": "ok",
+			"metal_detected": True,
+			"detection_state": "active",
+			"likely_material": "ferrous_metal",
+			"note": "Metal object detected within 4mm range (aluminum, steel, iron, copper)",
+		}
+	else:  # status == 0
+		return {
+			"status": "ok",
+			"metal_detected": False,
+			"detection_state": "inactive",
+			"likely_material": "non_metallic",
+			"note": "No metal detected (plastic, glass, organic waste, or no object)",
+		}
+
+
 def classify_ultrasonic_detection(distance_cm: Optional[float]):
 	"""Classify object detection based on JSN-SR04T ultrasonic sensor distance.
 	
@@ -451,6 +539,10 @@ async def telemetry(json_payload: dict):
 	ultrasonic_raw = g("ultrasonic_cm") or g("ultrasonic")
 	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(ultrasonic_raw)
 	
+	# Parse inductive proximity sensor
+	proximity_raw = g("proximity_inductive") or g("proximity")
+	proximity_status, proximity_error = parse_inductive_proximity(proximity_raw)
+	
 	# Get combined gas analysis
 	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
 	if mq2_error:
@@ -462,6 +554,11 @@ async def telemetry(json_payload: dict):
 	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
 	if ultrasonic_error:
 		ultrasonic_analysis["error"] = ultrasonic_error
+	
+	# Get inductive proximity analysis
+	proximity_analysis = classify_inductive_proximity(proximity_status)
+	if proximity_error:
+		proximity_analysis["error"] = proximity_error
 
 	row = [
 		ts,
@@ -489,7 +586,12 @@ async def telemetry(json_payload: dict):
 	]
 
 	append_row(row)
-	return JSONResponse({"status":"ok", "gas_analysis": gas_analysis, "ultrasonic_analysis": ultrasonic_analysis})
+	return JSONResponse({
+		"status":"ok", 
+		"gas_analysis": gas_analysis, 
+		"ultrasonic_analysis": ultrasonic_analysis,
+		"proximity_analysis": proximity_analysis
+	})
 
 @app.post("/image")
 async def image(
@@ -551,6 +653,9 @@ async def image(
 	# Parse ultrasonic sensor
 	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(s.get("ultrasonic_cm") or s.get("ultrasonic"))
 	
+	# Parse inductive proximity sensor
+	proximity_status, proximity_error = parse_inductive_proximity(s.get("proximity_inductive") or s.get("proximity"))
+	
 	# Get combined gas analysis
 	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
 	if mq2_error:
@@ -562,6 +667,11 @@ async def image(
 	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
 	if ultrasonic_error:
 		ultrasonic_analysis["error"] = ultrasonic_error
+	
+	# Get inductive proximity analysis
+	proximity_analysis = classify_inductive_proximity(proximity_status)
+	if proximity_error:
+		proximity_analysis["error"] = proximity_error
 
 	# write to CSV using canonical order
 	ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -622,6 +732,7 @@ async def image(
 		"hazard_type": hazard_type,
 		"gas_analysis": gas_analysis,
 		"ultrasonic_analysis": ultrasonic_analysis,
+		"proximity_analysis": proximity_analysis,
 	})
 
 
@@ -699,6 +810,9 @@ def image_url(payload: dict):
 	# Parse ultrasonic sensor
 	ultrasonic_cm, ultrasonic_error = parse_ultrasonic_distance(sensors.get("ultrasonic_cm") or sensors.get("ultrasonic"))
 	
+	# Parse inductive proximity sensor
+	proximity_status, proximity_error = parse_inductive_proximity(sensors.get("proximity_inductive") or sensors.get("proximity"))
+	
 	# Get combined gas analysis
 	gas_analysis = analyze_combined_gas(mq2_ppm, mq135_ppm)
 	if mq2_error:
@@ -710,6 +824,11 @@ def image_url(payload: dict):
 	ultrasonic_analysis = classify_ultrasonic_detection(ultrasonic_cm)
 	if ultrasonic_error:
 		ultrasonic_analysis["error"] = ultrasonic_error
+	
+	# Get inductive proximity analysis
+	proximity_analysis = classify_inductive_proximity(proximity_status)
+	if proximity_error:
+		proximity_analysis["error"] = proximity_error
 
 	row = [
 		ts, sget("device_id"), sget("boat_id"), sget("lat"), sget("lon"),
@@ -735,6 +854,7 @@ def image_url(payload: dict):
 		"hazard_type": hazard_type,
 		"gas_analysis": gas_analysis,
 		"ultrasonic_analysis": ultrasonic_analysis,
+		"proximity_analysis": proximity_analysis,
 	})
 
 @app.get("/detected")
