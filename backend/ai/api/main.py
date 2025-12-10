@@ -185,7 +185,8 @@ def parse_ultrasonic_distance(value, sensor_name: str = "JSN-SR04T") -> tuple:
 def classify_ultrasonic_detection(distance_cm: Optional[float]):
 	"""Classify object detection based on JSN-SR04T ultrasonic sensor distance.
 	
-	Returns detection status, range classification, and recommendations.
+	Focuses purely on object detection within sensor range (25-450cm).
+	Returns detection status, proximity classification, and distance information.
 	"""
 	if distance_cm is None:
 		return {
@@ -193,7 +194,7 @@ def classify_ultrasonic_detection(distance_cm: Optional[float]):
 			"distance_cm": None,
 			"range": "unknown",
 			"object_detected": False,
-			"fill_level_pct": None,
+			"proximity": "unknown",
 			"note": "ultrasonic_cm missing",
 		}
 	
@@ -204,55 +205,50 @@ def classify_ultrasonic_detection(distance_cm: Optional[float]):
 			-2: "Invalid format",
 			-3: "Negative distance reading",
 			-4: "Below minimum range (25cm)",
-			-5: "Above maximum range (450cm)",
+			-5: "Above maximum range (450cm) or no object detected",
 		}
 		return {
 			"status": "error",
 			"distance_cm": distance_cm,
 			"range": "error",
 			"object_detected": False,
-			"fill_level_pct": None,
+			"proximity": "error",
 			"note": error_messages.get(int(distance_cm), "Unknown sensor error"),
 		}
 	
-	# Distance classification bands
-	# Assuming sensor is mounted at top of bin looking down
-	# Maximum 450cm = empty, minimum 25cm = full
-	MAX_DISTANCE = 450  # cm (empty bin)
-	MIN_DISTANCE = 25   # cm (full bin)
+	# Object detection classification based on distance
+	# JSN-SR04T effective range: 25cm to 450cm
 	
-	# Calculate fill level percentage (inverse of distance)
-	fill_level = 100 - ((distance_cm - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE) * 100)
-	fill_level = max(0, min(100, fill_level))  # Clamp to 0-100
+	object_detected = True
 	
-	# Range classification
+	# Proximity classification (how close the object is)
 	if distance_cm <= 50:
 		range_class = "very_close"
-		note = "Object very close - bin almost full"
-		object_detected = True
+		proximity = "immediate"
+		note = "Object detected at very close range"
 	elif distance_cm <= 100:
 		range_class = "close"
-		note = "Object close - bin filling up"
-		object_detected = True
+		proximity = "near"
+		note = "Object detected at close range"
 	elif distance_cm <= 200:
 		range_class = "medium"
-		note = "Object at medium distance"
-		object_detected = True
+		proximity = "moderate"
+		note = "Object detected at medium distance"
 	elif distance_cm <= 350:
 		range_class = "far"
-		note = "Object far - bin has space"
-		object_detected = True
-	else:
+		proximity = "distant"
+		note = "Object detected at far range"
+	else:  # 350 < distance <= 450
 		range_class = "very_far"
-		note = "Object very far or bin empty"
-		object_detected = distance_cm < 450
+		proximity = "very_distant"
+		note = "Object detected at maximum range"
 	
 	return {
 		"status": "ok",
 		"distance_cm": round(distance_cm, 2),
 		"range": range_class,
 		"object_detected": object_detected,
-		"fill_level_pct": round(fill_level, 1),
+		"proximity": proximity,
 		"note": note,
 	}
 

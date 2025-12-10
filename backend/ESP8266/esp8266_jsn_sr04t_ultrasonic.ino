@@ -1,19 +1,26 @@
 /*
- * ESP8266 JSN-SR04T Waterproof Ultrasonic Sensor Monitor
+ * ESP8266 JSN-SR04T Waterproof Ultrasonic Sensor - Object Detection
  * 
- * Reads JSN-SR04T ultrasonic distance sensor for object detection
- * and waste bin fill level monitoring. Posts telemetry to FastAPI backend.
+ * Detects objects using JSN-SR04T ultrasonic distance sensor and reports
+ * object presence and proximity to FastAPI backend.
  * 
  * SENSOR SPECIFICATIONS:
  * ======================
  * JSN-SR04T Waterproof Ultrasonic Sensor:
- * - Operating Range: 25cm to 450cm (maximum range used)
+ * - Operating Range: 25cm to 450cm (maximum range used for detection)
  * - Operating Voltage: 5V DC
  * - Ultrasonic Frequency: 40kHz
  * - Waterproof: IP67 rated (fully sealed probe)
  * - Measuring Angle: 75 degrees
  * - Trigger Input Signal: 10µS TTL pulse
  * - Echo Output Signal: TTL pulse proportional to distance
+ * 
+ * APPLICATION: Pure Object Detection
+ * ===================================
+ * - Detects presence of objects within 25-450cm range
+ * - Reports distance and proximity classification
+ * - No fill-level calculation (pure detection mode)
+ * - Suitable for obstacle detection, presence sensing, proximity monitoring
  * 
  * HARDWARE WIRING:
  * ================
@@ -67,11 +74,6 @@ const float MAX_DISTANCE = 450.0;  // Maximum valid distance (cm)
 const float TIMEOUT_DISTANCE = 500.0; // Distance timeout threshold
 const long ECHO_TIMEOUT = 30000;   // Echo timeout in microseconds (30ms)
 
-// ===== Bin Configuration =====
-// Configure these based on your bin dimensions
-const float BIN_HEIGHT = 400.0;    // Total bin height in cm (adjust to your bin)
-const float SENSOR_HEIGHT = 420.0; // Height where sensor is mounted (slightly above bin)
-
 // ===== Timing Configuration =====
 const unsigned long POST_INTERVAL = 10000;  // Post every 10 seconds
 unsigned long lastPostTime = 0;
@@ -88,9 +90,10 @@ struct DistanceMeasurement {
 void setup() {
 	Serial.begin(115200);
 	delay(100);
-	Serial.println("\n\n=== ESP8266 JSN-SR04T Ultrasonic Monitor ===");
+	Serial.println("\n\n=== ESP8266 JSN-SR04T Object Detection ===");
 	Serial.println("Waterproof Ultrasonic Distance Sensor");
-	Serial.println("Range: 25cm - 450cm (Maximum Range)");
+	Serial.println("Detection Range: 25cm - 450cm");
+	Serial.println("Mode: Pure Object Detection\n");
 	
 	// Configure pins
 	pinMode(TRIG_PIN, OUTPUT);
@@ -224,21 +227,21 @@ DistanceMeasurement measureDistance() {
 	return result;
 }
 
-// ===== Calculate Fill Level =====
-float calculateFillLevel(float distance_cm) {
-	if (distance_cm < 0 || distance_cm > MAX_DISTANCE) {
-		return 0.0;
+// ===== Classify Detection Proximity =====
+String classifyProximity(float distance_cm) {
+	if (distance_cm < 0) {
+		return "error";
+	} else if (distance_cm <= 50) {
+		return "immediate";
+	} else if (distance_cm <= 100) {
+		return "near";
+	} else if (distance_cm <= 200) {
+		return "moderate";
+	} else if (distance_cm <= 350) {
+		return "distant";
+	} else {
+		return "very_distant";
 	}
-	
-	// Calculate fill percentage
-	// Closer distance = fuller bin
-	// Assuming sensor is mounted at SENSOR_HEIGHT looking down into BIN_HEIGHT
-	float fillLevel = 100.0 - ((distance_cm - MIN_DISTANCE) / (BIN_HEIGHT - MIN_DISTANCE) * 100.0);
-	
-	// Clamp to 0-100 range
-	fillLevel = max(0.0f, min(100.0f, fillLevel));
-	
-	return fillLevel;
 }
 
 // ===== Classify Detection Range =====
@@ -261,7 +264,7 @@ String classifyRange(float distance_cm) {
 // ===== Print Measurement =====
 void printMeasurement(const DistanceMeasurement& measurement) {
 	Serial.println("========================================");
-	Serial.println("    JSN-SR04T DISTANCE MEASUREMENT");
+	Serial.println("    JSN-SR04T OBJECT DETECTION");
 	Serial.println("========================================");
 	
 	if (!measurement.valid) {
@@ -269,6 +272,7 @@ void printMeasurement(const DistanceMeasurement& measurement) {
 		Serial.println(measurement.error_msg);
 		Serial.print("  Error Code: ");
 		Serial.println(measurement.error_code);
+		Serial.println("  Object Detected: NO");
 	} else {
 		Serial.print("  Distance: ");
 		Serial.print(measurement.distance_cm, 2);
@@ -277,17 +281,10 @@ void printMeasurement(const DistanceMeasurement& measurement) {
 		Serial.print("  Range: ");
 		Serial.println(classifyRange(measurement.distance_cm));
 		
-		float fillLevel = calculateFillLevel(measurement.distance_cm);
-		Serial.print("  Fill Level: ");
-		Serial.print(fillLevel, 1);
-		Serial.println(" %");
+		Serial.print("  Proximity: ");
+		Serial.println(classifyProximity(measurement.distance_cm));
 		
-		// Object detection status
-		if (measurement.distance_cm < MAX_DISTANCE) {
-			Serial.println("  Object: DETECTED");
-		} else {
-			Serial.println("  Object: NOT DETECTED");
-		}
+		Serial.println("  Object Detected: YES");
 	}
 	
 	Serial.println("========================================\n");
@@ -312,7 +309,7 @@ void postTelemetry(const DistanceMeasurement& measurement) {
 	
 	// Create JSON payload
 	StaticJsonDocument<512> doc;
-	doc["device_id"] = "ESP8266_JSN_SR04T";
+	doc["device_id"] = "ESP8266_JSN_SR04T_DETECTOR";
 	doc["timestamp"] = millis();
 	
 	// Add distance measurement
@@ -321,11 +318,6 @@ void postTelemetry(const DistanceMeasurement& measurement) {
 	// Add error message if present
 	if (!measurement.valid && !measurement.error_msg.isEmpty()) {
 		doc["ultrasonic_error"] = measurement.error_msg;
-	}
-	
-	// Add calculated fill level if valid
-	if (measurement.valid) {
-		doc["fill_level_pct"] = calculateFillLevel(measurement.distance_cm);
 	}
 	
 	// Optional: Add temperature reading if you have DHT sensor
@@ -383,7 +375,7 @@ void parseBackendResponse(const String& jsonResponse) {
 	JsonObject analysis = doc["ultrasonic_analysis"];
 	
 	Serial.println("========================================");
-	Serial.println("   BACKEND ULTRASONIC ANALYSIS");
+	Serial.println("   BACKEND OBJECT DETECTION ANALYSIS");
 	Serial.println("========================================");
 	
 	if (analysis.containsKey("status")) {
@@ -402,15 +394,14 @@ void parseBackendResponse(const String& jsonResponse) {
 		Serial.println(analysis["range"].as<String>());
 	}
 	
+	if (analysis.containsKey("proximity")) {
+		Serial.print("Proximity: ");
+		Serial.println(analysis["proximity"].as<String>());
+	}
+	
 	if (analysis.containsKey("object_detected")) {
 		Serial.print("Object Detected: ");
 		Serial.println(analysis["object_detected"].as<bool>() ? "YES" : "NO");
-	}
-	
-	if (analysis.containsKey("fill_level_pct")) {
-		Serial.print("Fill Level: ");
-		Serial.print(analysis["fill_level_pct"].as<float>(), 1);
-		Serial.println(" %");
 	}
 	
 	if (analysis.containsKey("note")) {
